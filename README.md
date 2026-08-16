@@ -92,6 +92,25 @@ autologin-user=admin
 autologin-user-timeout=0
 ```
 
+注意：（ROOT用户注意！！）解除系统对 root 自动登录的限制：
+运行以下命令，注释掉 PAM 模块中拦截 root 自动登录的规则：
+```bash
+cat << 'EOF' > /etc/pam.d/lightdm-autologin
+#%PAM-1.0
+auth    required        pam_permit.so
+# auth  required        pam_succeed_if.so user != root quiet_success
+auth    optional        pam_gnome_keyring.so
+@include common-account
+session [success=ok ignore=ignore default=bad] pam_selinux.so open
+session required        pam_limits.so
+session required        pam_env.so readenv=1
+session required        pam_env.so readenv=1 envfile=/etc/default/locale
+session optional        pam_gnome_keyring.so auto_start
+@include common-session
+@include common-password
+EOF
+```
+
 ### 2. 添加 VRCX 开机图形桌面自启动项
 
 将 VRCX 的启动脚本加入 XFCE 桌面环境的 autostart 自动化目录中：
