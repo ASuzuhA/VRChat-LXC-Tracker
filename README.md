@@ -5,8 +5,11 @@
 ---
 
 注意：下载的VRCX文件默认改成："Vrcx.AppImage"才能正常生效！！
--
+
+---
 注意：下载的VRCX文件默认改成："Vrcx.AppImage"才能正常生效！！
+
+---
 注意：下载的VRCX文件默认改成："Vrcx.AppImage"才能正常生效！！
 
 ---
