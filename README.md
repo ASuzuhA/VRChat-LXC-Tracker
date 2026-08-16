@@ -103,7 +103,9 @@ autologin-user-timeout=0
 ```
 
 注意：（ROOT用户注意！！）解除系统对 root 自动登录的限制：
--运行以下命令，注释掉 PAM 模块中拦截 root 自动登录的规则：
+
+---
+运行以下命令，注释掉 PAM 模块中拦截 root 自动登录的规则：
 ```bash
 cat << 'EOF' > /etc/pam.d/lightdm-autologin
 #%PAM-1.0
