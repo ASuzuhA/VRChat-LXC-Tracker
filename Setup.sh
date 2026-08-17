@@ -1,14 +1,18 @@
 #!/bin/bash
 # ==============================================================================
-# VRChat Track Logger 一键纯环境部署脚本
-# 作用：安装系统依赖、获取 VRCX (预先提供多种下载/放置途径)、生成全部核心脚本
-# 说明：仅需在全新的容器/系统上运行一次！
+# VRChat Track Logger 最终完全体一键部署脚本
+# 特性：
+# 1. 自动安装系统依赖 (含 XFCE4, xrdp, Xvfb 虚拟桌面)
+# 2. 智能匹配架构下载/解压 VRCX (提供 3 种获取途径)
+# 3. 自动检测并解除 Root 下 PAM/Polkit 的远程桌面限制
+# 4. 配置 RDP 图形桌面登录后的 VRCX 自动拉起
+# 5. 配置 Systemd 开机自启服务 (实例重启后无需手动连 RDP 即可静默运行 VRCX)
 # ==============================================================================
 
 set -e
 
 echo "=================================================="
-echo "    VRChat Track Logger 环境部署 (仅首次运行)"
+echo "    VRChat Track Logger 一键纯环境部署"
 echo "=================================================="
 
 # 默认安装绝对路径
@@ -24,7 +28,7 @@ mkdir -p "$APP_DIR" "$DATA_DIR"
 echo -e "\n⏳ 1. 正在更新系统软件包并安装基础依赖..."
 export DEBIAN_FRONTEND=noninteractive
 apt update && apt upgrade -y
-apt install -y wget curl unzip xfce4 xrdp python3 python3-pip sqlite3 jq tzdata cron
+apt install -y wget curl unzip xfce4 xrdp xvfb python3 python3-pip sqlite3 jq tzdata cron
 
 # 设置系统时区为 Asia/Shanghai (UTC+8)
 timedatectl set-timezone Asia/Shanghai || true
@@ -90,7 +94,6 @@ while [ "$download_success" = false ]; do
             fi
             ;;
         3)
-            # 检查当前或根目录下是否已有文件
             if [ -f "$APP_DIR/VRCX.AppImage" ]; then
                 echo "✅ 在 $APP_DIR 找到了 VRCX.AppImage！"
                 download_success=true
@@ -119,7 +122,7 @@ rm -rf squashfs-root
 
 # 3. 初始化默认配置文件 (config.json)
 if [ ! -f "$APP_DIR/config.json" ]; then
-    cat <<JSON > "$APP_DIR/config.json"
+    cat <<JSON > "$CONFIG_PATH"
 {
   "target_user_id": "",
   "cron_minutes": 5,
@@ -192,13 +195,12 @@ def process_data():
     cursor = conn.cursor()
     events_by_date = {}
 
-    # 1. 状态变动记录 (feed_status / feed_online_offline)
+    # 1. 状态变动记录
     if cfg.get("log_status", True):
         for table in find_table(cursor, "feed_status") + find_table(cursor, "feed_online_offline"):
             try:
                 cursor.execute(f"PRAGMA table_info('{table}')")
                 cols = [c[1] for c in cursor.fetchall()]
-                
                 user_col = "user_id" if "user_id" in cols else "userId"
                 time_col = "created_at" if "created_at" in cols else ("created" if "created" in cols else "timestamp")
                 
@@ -213,18 +215,13 @@ def process_data():
                         status_val = str(row[cols.index("status")]) if "status" in cols else ""
                         desc_val = str(row[cols.index("status_description")]) if "status_description" in cols else ""
                         
-                        if status_val in ["None", "null", "NoneType", ""]:
-                            status_val = ""
-                        if desc_val in ["None", "null", "NoneType", ""]:
-                            desc_val = ""
+                        if status_val in ["None", "null", "NoneType", ""]: status_val = ""
+                        if desc_val in ["None", "null", "NoneType", ""]: desc_val = ""
 
-                        # 过滤无状态无签名的冗余日志
-                        if not status_val and not desc_val:
-                            continue
+                        if not status_val and not desc_val: continue
 
                         action_text = f"状态变动: {status_val}" if status_val else "状态签名更新"
-                        if desc_val:
-                            action_text += f" - 签名: \"{desc_val}\""
+                        if desc_val: action_text += f" - 签名: \"{desc_val}\""
 
                         events_by_date.setdefault(date_str, []).append({
                             "raw_time": dt,
@@ -235,13 +232,12 @@ def process_data():
             except Exception:
                 pass
 
-    # 2. 房间 GPS 位置记录 (feed_gps)
+    # 2. 房间 GPS 位置记录
     if cfg.get("log_world", True):
         for table in find_table(cursor, "feed_gps"):
             try:
                 cursor.execute(f"PRAGMA table_info('{table}')")
                 cols = [c[1] for c in cursor.fetchall()]
-                
                 user_col = "user_id" if "user_id" in cols else "userId"
                 time_col = "created_at" if "created_at" in cols else ("created" if "created" in cols else "timestamp")
 
@@ -264,13 +260,12 @@ def process_data():
             except Exception:
                 pass
 
-    # 3. 更换 Avatar 模型 (feed_avatar 或 avatar_history)
+    # 3. 更换 Avatar 模型
     if cfg.get("log_avatar", True):
         for table in find_table(cursor, "feed_avatar") + find_table(cursor, "avatar_history"):
             try:
                 cursor.execute(f"PRAGMA table_info('{table}')")
                 cols = [c[1] for c in cursor.fetchall()]
-
                 user_col = "user_id" if "user_id" in cols else "userId"
                 time_col = "created_at" if "created_at" in cols else ("created" if "created" in cols else "timestamp")
 
@@ -296,13 +291,12 @@ def process_data():
             except Exception:
                 pass
 
-    # 4. 修改 Bio 简介 (feed_bio)
+    # 4. 修改 Bio 简介
     if cfg.get("log_bio", True):
         for table in find_table(cursor, "feed_bio"):
             try:
                 cursor.execute(f"PRAGMA table_info('{table}')")
                 cols = [c[1] for c in cursor.fetchall()]
-
                 user_col = "user_id" if "user_id" in cols else "userId"
                 time_col = "created_at" if "created_at" in cols else ("created" if "created" in cols else "timestamp")
 
@@ -327,13 +321,11 @@ def process_data():
 
     conn.close()
 
-    # 全局时间排序
     all_events = []
     for d, evts in events_by_date.items():
         all_events.extend(evts)
     all_events.sort(key=lambda x: x["raw_time"])
 
-    # 动态计算停留时长
     world_events = [e for e in all_events if e["event_type"] == "world_change"]
     for i in range(len(world_events)):
         curr_e = world_events[i]
@@ -344,7 +336,6 @@ def process_data():
         else:
             curr_e["duration"] = "至今 / 未离场"
 
-    # 按日期分组整理输出
     final_output = []
     grouped_by_date = {}
     for e in all_events:
@@ -366,14 +357,13 @@ if __name__ == "__main__":
     process_data()
 PYEOF
 
-# 5. 生成交互式配置脚本 (config_logger.sh)
+# 5. 生成日常使用的交互式参数配置脚本 (config_logger.sh)
 cat << 'CONFIGEOF' > "$APP_DIR/config_logger.sh"
 #!/bin/bash
 
 APP_DIR=$(cd $(dirname $0); pwd)
 CONFIG_FILE="$APP_DIR/config.json"
 
-# 读取现有配置
 get_cfg() {
     python3 -c "import json; f=open('$CONFIG_FILE'); d=json.load(f); print(d.get('$1', ''))" 2>/dev/null
 }
@@ -385,14 +375,12 @@ echo "=========================================="
 echo "      VRChat Logger 交互式参数配置"
 echo "=========================================="
 
-# 询问用户配置
 read -p "请输入追踪的目标 VRChat User ID [$CURR_USER_ID]: " USER_ID
 USER_ID="${USER_ID:-$CURR_USER_ID}"
 
 read -p "请输入后台自动导出的时间间隔(分钟) [默认: ${CURR_CRON:-5}]: " CRON_MIN
 CRON_MIN="${CRON_MIN:-${CURR_CRON:-5}}"
 
-# 选项开关控制
 read -p "是否记录【在线状态/签名】变动? (Y/n): " LOG_STATUS
 LOG_STATUS=$(echo "${LOG_STATUS:-Y}" | grep -iq "^y" && echo "true" || echo "false")
 
@@ -405,7 +393,6 @@ LOG_AVATAR=$(echo "${LOG_LOG_AVATAR:-Y}" | grep -iq "^y" && echo "true" || echo 
 read -p "是否记录【修改 Bio 简介】记录? (Y/n): " LOG_BIO
 LOG_BIO=$(echo "${LOG_BIO:-Y}" | grep -iq "^y" && echo "true" || echo "false")
 
-# 更新 config.json
 cat <<JSON > "$CONFIG_FILE"
 {
   "target_user_id": "$USER_ID",
@@ -417,20 +404,86 @@ cat <<JSON > "$CONFIG_FILE"
 }
 JSON
 
-# 更新 Crontab 定时任务
 (crontab -l 2>/dev/null | grep -v "$APP_DIR/export_daily.py" ; echo "*/$CRON_MIN * * * * python3 $APP_DIR/export_daily.py >/dev/null 2>&1") | crontab -
 
 echo "------------------------------------------"
-echo "✅ 配置已成功更新！"
-echo "📌 当前追踪 Target ID: $USER_ID"
-echo "⏱️ 后台 Cron 定时任务: 每 $CRON_MIN 分钟刷新一次"
+echo "✅ 参数更新完毕！当前追踪 Target ID: $USER_ID"
 echo "=========================================="
 CONFIGEOF
 
 chmod +x "$APP_DIR/config_logger.sh"
 
-echo -e "\n✅ 基础环境搭建完成！即将自动调用交互式配置脚本..."
+# 6. 【核心】写入开机自启、PAM/Polkit 解除以及无人值守后台服务
+echo -e "\n⚙️ 6. 正在自动化配置 PAM/Polkit 策略与开机自启动服务..."
+
+CURRENT_USER=$(whoami)
+
+# 如果是 Root 用户登录，解除 PAM 和 Polkit 限制
+if [ "$EUID" -eq 0 ] || [ "$CURRENT_USER" = "root" ]; then
+    echo "🔒 检测到 root 用户，正在配置系统级 PAM/Polkit 豁免规则..."
+    systemctl stop polkit 2>/dev/null || true
+    systemctl disable polkit 2>/dev/null || true
+    systemctl mask polkit 2>/dev/null || true
+
+    if [ -f "/etc/pam.d/xrdp-sesman" ]; then
+        sed -i 's/^.*pam_polkit.so.*$/#&/' /etc/pam.d/xrdp-sesman 2>/dev/null || true
+    fi
+
+    mkdir -p /etc/polkit-1/localauthority/50-local.d
+    cat <<PKEOF > /etc/polkit-1/localauthority/50-local.d/45-allow-all.pkla
+[Allow All Root Operations]
+Identity=unix-user:root
+Action=*
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes
+PKEOF
+fi
+
+# 配置 1：图形桌面登录自启动项 (.desktop)
+AUTOSTART_DIR="$HOME/.config/autostart"
+mkdir -p "$AUTOSTART_DIR"
+
+cat <<DESKEOF > "$AUTOSTART_DIR/vrcx.desktop"
+[Desktop Entry]
+Type=Application
+Name=VRCX AutoStart
+Exec=$APP_DIR/squashfs-root/AppRun --no-sandbox
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+DESKEOF
+
+chmod +x "$AUTOSTART_DIR/vrcx.desktop"
+
+# 配置 2：Systemd 后台静默 Headless 服务 (实例重启无人连入时自动拉起)
+if command -v systemctl >/dev/null 2>&1 && [ "$EUID" -eq 0 ]; then
+    cat <<SERVICEEOF > /etc/systemd/system/vrcx-headless.service
+[Unit]
+Description=VRCX Headless AutoStart Service
+After=network.target
+
+[Service]
+Type=simple
+User=$CURRENT_USER
+Environment=DISPLAY=:99
+ExecStartPre=/bin/sh -c '/usr/bin/Xvfb :99 -screen 0 1280x1024x24 &'
+ExecStart=$APP_DIR/squashfs-root/AppRun --no-sandbox
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+SERVICEEOF
+
+    systemctl daemon-reload
+    systemctl enable vrcx-headless.service 2>/dev/null || true
+    systemctl restart vrcx-headless.service 2>/dev/null || true
+fi
+
+echo -e "\n✅ 基础环境与全局开机自启动配置完全完成！"
+echo "即将为你拉起交互式配置菜单..."
 sleep 1
 
-# 首次自动启动配置脚本
+# 首次调用配置脚本
 bash "$APP_DIR/config_logger.sh"
