@@ -1,375 +1,231 @@
 #!/bin/bash
-
-# =========================================================
-# VRCX 数据解析与 JSON 提取全自动部署脚本 (Debian 12 增强完整版)
-# 支持：全参数 SQLite 解析 (地图/上下线/状态/签名/模型/Bio) + 自动环境构建
-# =========================================================
+# ==============================================================================
+# VRChat Track Logger 一键纯环境部署脚本
+# 作用：安装系统依赖、自动识别 CPU 架构并下载解压 VRCX，生成底层运行环境
+# 说明：仅需在全新的容器/系统上运行一次！
+# ==============================================================================
 
 set -e
 
-# 预设默认值
-DEFAULT_TARGET_ID="usr_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-DEFAULT_RDP_USER="root"
-DEFAULT_RDP_PASS="password"
-DEFAULT_TIMEZONE="Asia/Shanghai"
-DEFAULT_INTERVAL_TYPE="1" # 默认: 分钟
-DEFAULT_INTERVAL_VAL="10" # 默认: 10分钟
+echo "=================================================="
+echo "   VRChat Track Logger 环境部署 (仅首次运行)"
+echo "=================================================="
 
-# ----------------- 交互式配置面板 -----------------
-clear
-echo "========================================================="
-echo "        🚀 VRCX 自动化部署与多维 JSON 数据提取面板        "
-echo "========================================================="
-echo ""
-echo "💡 提示：按 [Enter] 回车可直接使用 [括号] 中的默认值"
-echo ""
+# 默认安装绝对路径
+DEFAULT_INSTALL_DIR="$HOME"
+read -p "请输入部署根目录绝对路径 [默认: $DEFAULT_INSTALL_DIR]: " INSTALL_DIR
+INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
+INSTALL_DIR=$(eval echo "$INSTALL_DIR")
 
-# 1. 配置监控目标用户 ID
-read -p "1. 请输入要监控的 VRChat 用户 ID [$DEFAULT_TARGET_ID]: " INPUT_TARGET_ID
-TARGET_USER_ID=${INPUT_TARGET_ID:-$DEFAULT_TARGET_ID}
+APP_DIR="$INSTALL_DIR/vrcx"
+DATA_DIR="$INSTALL_DIR/vrcx_data"
+mkdir -p "$APP_DIR" "$DATA_DIR"
 
-# 2. 配置 RDP 用户名与密码
-read -p "2. 请输入远程桌面 (RDP) 登录账号 [$DEFAULT_RDP_USER]: " INPUT_RDP_USER
-RDP_USER=${INPUT_RDP_USER:-$DEFAULT_RDP_USER}
-
-read -p "3. 请输入远程桌面 (RDP) 登录密码 [$DEFAULT_RDP_PASS]: " INPUT_RDP_PASS
-RDP_PASS=${INPUT_RDP_PASS:-$DEFAULT_RDP_PASS}
-
-# 3. 配置数据刷新轮询频率
-echo ""
-echo "4. 请选择数据自动刷新的频率类型："
-echo "   [1] 按分钟 (Minutes) —— 推荐"
-echo "   [2] 按小时 (Hours)"
-echo "   [3] 按秒 (Seconds)"
-read -p "   请选择 [1-3] (默认 $DEFAULT_INTERVAL_TYPE): " INPUT_TYPE
-INTERVAL_TYPE=${INPUT_TYPE:-$DEFAULT_INTERVAL_TYPE}
-
-read -p "   请输入具体数值 (例如: 填 5 代表每 5 分钟/小时/秒) [$DEFAULT_INTERVAL_VAL]: " INPUT_VAL
-INTERVAL_VAL=${INPUT_VAL:-$DEFAULT_INTERVAL_VAL}
-
-TIMEZONE="$DEFAULT_TIMEZONE"
-
-echo ""
-echo "----------------- 当前生效的配置 -----------------"
-echo " 🎯 监控目标 User ID : $TARGET_USER_ID"
-echo " 👤 RDP 远程账号    : $RDP_USER"
-echo " 🔑 RDP 远程密码    : $RDP_PASS"
-case "$INTERVAL_TYPE" in
-    1) ECHO_FREQ="每 $INTERVAL_VAL 分钟" ;;
-    2) ECHO_FREQ="每 $INTERVAL_VAL 小时" ;;
-    3) ECHO_FREQ="每 $INTERVAL_VAL 秒" ;;
-    *) ECHO_FREQ="每 $INTERVAL_VAL 分钟" ;;
-esac
-echo " ⏱️ 数据轮询频率    : $ECHO_FREQ"
-echo "--------------------------------------------------"
-echo ""
-read -p "确认以上配置并开始部署？(Y/n): " CONFIRM
-if [[ "$CONFIRM" =~ ^[Nn]$ ]]; then
-    echo "❌ 已取消部署。"
-    exit 0
-fi
-
-echo ""
-echo "[1/4] 正在配置系统基础环境、GUI 依赖与时区..."
-ln -sf /usr/share/zoneinfo/"$TIMEZONE" /etc/localtime || timedatectl set-timezone "$TIMEZONE" || true
-
+echo -e "\n⏳ 1. 正在更新系统软件包并安装基础依赖..."
+export DEBIAN_FRONTEND=noninteractive
 apt update && apt upgrade -y
-apt install -y xfce4 xfce4-terminal xrdp sqlite3 python3 python3-pip wget curl cron jq \
-    libfuse2 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
-    libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2
+apt install -y wget curl unzip xfce4 xrdp python3 python3-pip sqlite3 jq tzdata
 
-echo "[2/4] 正在创建 RDP 远程桌面用户..."
-if ! id "$RDP_USER" &>/dev/null; then
-    useradd -m -s /bin/bash "$RDP_USER"
-fi
-echo "$RDP_USER:$RDP_PASS" | chpasswd
-usermod -aG ssl-cert "$RDP_USER" || true
+# 设置系统时区为 Asia/Shanghai (UTC+8)
+timedatectl set-timezone Asia/Shanghai || true
 systemctl enable --now xrdp
 
-echo "[3/4] 自动检测系统架构并动态抓取最新 VRCX AppImage..."
-RDP_HOME=$(eval echo "~$RDP_USER")
-APP_DIR="$RDP_HOME/vrcx"
-mkdir -p "$APP_DIR"
-cd "$APP_DIR"
-
-if [ ! -d "$APP_DIR/squashfs-root" ]; then
-    ARCH=$(uname -m)
-    case "$ARCH" in
-        x86_64|amd64) KEYWORD="x64" ;;
-        aarch64|arm64) KEYWORD="arm64" ;;
-        *) KEYWORD="x64" ;;
-    esac
-    echo "识别到系统 CPU 架构: $ARCH ，检索关键字 [$KEYWORD]..."
-
-    LATEST_URL=$(curl -s https://api.github.com/repos/vrcx-team/VRCX/releases/latest \
-        | jq -r ".assets[].browser_download_url" \
-        | grep -i "$KEYWORD" \
-        | grep -i "\.AppImage$" \
-        | head -n 1)
-
-    if [ -z "$LATEST_URL" ] || [ "$LATEST_URL" == "null" ]; then
-        echo "⚠️ 未能通过架构关键字精准匹配，获取通用 AppImage..."
-        LATEST_URL=$(curl -s https://api.github.com/repos/vrcx-team/VRCX/releases/latest \
-            | jq -r ".assets[].browser_download_url" \
-            | grep -i "\.AppImage$" \
-            | head -n 1)
-    fi
-
-    echo "正在下载最新版本: $LATEST_URL"
-    wget -q --show-progress "$LATEST_URL" -O VRCX.AppImage
-
-    chmod +x VRCX.AppImage
-    ./VRCX.AppImage --appimage-extract
-    rm -f VRCX.AppImage
-    chown -R "$RDP_USER:$RDP_USER" "$APP_DIR"
+echo -e "\n🔍 2. 识别 CPU 架构并自动获取最新版 VRCX AppImage..."
+ARCH=$(uname -m)
+if [ "$ARCH" = "x86_64" ]; then
+    REGEX="x86_64.*AppImage$"
+elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+    REGEX="arm64.*AppImage$"
+else
+    echo "❌ 暂不支持的系统架构: $ARCH"
+    exit 1
 fi
 
-echo "[4/4] 正在生成全参数 Python JSON 解析脚本与自动定时任务..."
-DATA_DIR="$RDP_HOME/vrcx_data"
-mkdir -p "$DATA_DIR"
-chown -R "$RDP_USER:$RDP_USER" "$DATA_DIR"
+LATEST_URL=$(curl -s https://api.github.com/repos/vrcx-team/VRCX/releases/latest | jq -r ".assets[] | select(.name | test(\"$REGEX\")) | .browser_download_url")
 
-TARGET_DB_PATH="$RDP_HOME/.config/VRCX/VRCX.sqlite3"
-TARGET_OUTPUT_JSON="$DATA_DIR/data.json"
+if [ -z "$LATEST_URL" ] || [ "$LATEST_URL" = "null" ]; then
+    echo "❌ 无法获取 VRCX 下载地址，请检查网络或 GitHub API 限制。"
+    exit 1
+fi
 
-cat << EOF > "$APP_DIR/export_daily.py"
-import sqlite3
-import json
+cd "$APP_DIR"
+wget -O VRCX.AppImage "$LATEST_URL"
+chmod +x VRCX.AppImage
+
+echo "📦 正在解压 VRCX 免安装绿色运行环境..."
+rm -rf squashfs-root
+./VRCX.AppImage --appimage-extract
+
+# 3. 初始化默认配置文件 (config.json)
+if [ ! -f "$APP_DIR/config.json" ]; then
+    cat <<JSON > "$APP_DIR/config.json"
+{
+  "target_user_id": "",
+  "cron_minutes": 5,
+  "log_status": true,
+  "log_world": true,
+  "log_avatar": true,
+  "log_bio": true
+}
+JSON
+fi
+
+# 4. 生成底层的 Python 解析核心 (export_daily.py)
+cat << 'PYEOF' > "$APP_DIR/export_daily.py"
 import os
-import time
 import sys
-from datetime import datetime, timedelta
+import json
+import sqlite3
+from datetime import datetime, timezone, timedelta
 
-TARGET_USER_ID = "$TARGET_USER_ID".strip().lower()
-DB_PATH = "$TARGET_DB_PATH"
-OUTPUT_JSON = "$TARGET_OUTPUT_JSON"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(APP_DIR, "config.json")
+DATA_DIR = os.path.join(os.path.dirname(APP_DIR), "vrcx_data")
+OUTPUT_JSON = os.path.join(DATA_DIR, "data.json")
 
-def parse_iso_dt(time_str):
+HOME_DIR = os.path.expanduser("~")
+DB_PATH = os.path.join(HOME_DIR, ".config", "VRCX", "VRCX.sqlite3")
+
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def get_beijing_time(utc_str):
     try:
-        clean_time = str(time_str).split('.')[0].replace('Z', '')
-        dt = datetime.strptime(clean_time, "%Y-%m-%dT%H:%M:%S")
-        return dt + timedelta(hours=8)
+        dt = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone(timedelta(hours=8)))
     except Exception:
-        return datetime.now()
+        return None
 
-def format_duration(seconds):
-    if seconds < 60:
-        return "< 1分钟"
-    minutes = int(seconds // 60)
-    if minutes < 60:
-        return f"{minutes}分钟"
-    hours = minutes // 60
-    rem_mins = minutes % 60
-    if rem_mins == 0:
-        return f"{hours}小时"
-    return f"{hours}小时{rem_mins}分钟"
+def process_data():
+    cfg = load_config()
+    target_user_id = cfg.get("target_user_id", "").strip()
 
-def get_full_activity_data():
-    if not os.path.exists(DB_PATH):
-        print(f"[{datetime.now()}] 暂未找到数据库文件 {DB_PATH}，请确保 VRCX 已运行并登录。")
-        return {}
+    if not target_user_id or not os.path.exists(DB_PATH):
+        return
 
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
+    events_by_date = {}
 
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_feed_%';")
-    tables = [row['name'] for row in cursor.fetchall()]
+    # 1. 上下线与状态模式
+    if cfg.get("log_status", True):
+        cursor.execute(
+            "SELECT created_at, type, status, status_description FROM user_status_history WHERE user_id = ? ORDER BY created_at ASC",
+            (target_user_id,)
+        )
+        for row in cursor.fetchall():
+            dt = get_beijing_time(row[0])
+            if not dt: continue
+            date_str = dt.strftime("%Y-%m-%d")
+            time_str = dt.strftime("%H:%M:%S")
 
-    events = []
+            status_type = row[1]
+            desc = row[3] or ""
+            action_text = f"状态变动: {status_type}"
+            if desc: action_text += f" - 签名: \"{desc}\""
 
-    for tbl in tables:
-        cursor.execute(f"SELECT * FROM {tbl} ORDER BY created_at ASC")
-        rows = cursor.fetchall()
+            events_by_date.setdefault(date_str, []).append({
+                "raw_time": dt,
+                "time": time_str,
+                "event_type": "status_change",
+                "action": action_text
+            })
 
-        for row in rows:
-            item = dict(row)
-            if TARGET_USER_ID not in str(item.get("user_id", "")).lower():
-                continue
+    # 2. 房间变动
+    if cfg.get("log_world", True):
+        cursor.execute(
+            "SELECT created_at, world_name, duration FROM location_history WHERE user_id = ? ORDER BY created_at ASC",
+            (target_user_id,)
+        )
+        for row in cursor.fetchall():
+            dt = get_beijing_time(row[0])
+            if not dt: continue
+            date_str = dt.strftime("%Y-%m-%d")
+            time_str = dt.strftime("%H:%M:%S")
 
-            dt_local = parse_iso_dt(item.get("created_at", ""))
+            duration_sec = row[2] or 0
+            dur_str = f"{duration_sec // 60}分钟" if duration_sec >= 60 else f"{duration_sec}秒"
 
-            # 1. 地图 / 实例位置变动 (_feed_gps)
-            if "_feed_gps" in tbl:
-                world_name = item.get("world_name")
-                location = str(item.get("location", ""))
-                group_name = item.get("group_name") or ""
-                
-                if "private" in location.lower() or "hidden" in location.lower() or not world_name or world_name == "Private":
-                    display_world = "私人房间 (Private Instance)"
-                else:
-                    display_world = str(world_name)
-                    if group_name:
-                        display_world += f" [群组: {group_name}]"
+            events_by_date.setdefault(date_str, []).append({
+                "raw_time": dt,
+                "time": time_str,
+                "event_type": "world_change",
+                "world": row[1] or "未知房间",
+                "duration": dur_str
+            })
 
-                events.append({
-                    "dt": dt_local,
-                    "event_type": "world_change",
-                    "world": display_world,
-                    "raw_location": location
-                })
+    # 3. Avatar 模型更换
+    if cfg.get("log_avatar", True):
+        cursor.execute(
+            "SELECT created_at, avatar_name, thumbnail_url FROM avatar_history WHERE user_id = ? ORDER BY created_at ASC",
+            (target_user_id,)
+        )
+        for row in cursor.fetchall():
+            dt = get_beijing_time(row[0])
+            if not dt: continue
+            date_str = dt.strftime("%Y-%m-%d")
+            time_str = dt.strftime("%H:%M:%S")
 
-            # 2. 上下线状态 (_feed_online_offline)
-            elif "_feed_online_offline" in tbl:
-                evt_type = str(item.get("type", "")).lower()
-                status_str = "上线" if "online" in evt_type else ("下线" if "offline" in evt_type else evt_type)
-                events.append({
-                    "dt": dt_local,
-                    "event_type": "status_change",
-                    "detail": status_str
-                })
+            events_by_date.setdefault(date_str, []).append({
+                "raw_time": dt,
+                "time": time_str,
+                "event_type": "avatar_change",
+                "avatar_name": row[1] or "未知 Avatar",
+                "thumbnail": row[2] or "",
+                "action": f"更换模型为 [{row[1]}]"
+            })
 
-            # 3. 状态模式与签名变动 (_feed_status)
-            elif "_feed_status" in tbl:
-                status_mode = str(item.get("status", "")).lower()
-                status_desc = item.get("status_description") or ""
+    # 4. Bio 修改
+    if cfg.get("log_bio", True):
+        cursor.execute(
+            "SELECT created_at, bio FROM bio_history WHERE user_id = ? ORDER BY created_at ASC",
+            (target_user_id,)
+        )
+        for row in cursor.fetchall():
+            dt = get_beijing_time(row[0])
+            if not dt: continue
+            date_str = dt.strftime("%Y-%m-%d")
+            time_str = dt.strftime("%H:%M:%S")
 
-                mode_map = {
-                    "active": "在线 (Active)",
-                    "join me": "请加入我 (Join Me)",
-                    "ask me": "请询问我 (Ask Me)",
-                    "busy": "请勿打扰 (Busy)"
-                }
-                mapped_mode = mode_map.get(status_mode, status_mode)
-                
-                action_text = f"切换状态模式为 [{mapped_mode}]"
-                if status_desc:
-                    action_text += f" - 签名: \"{status_desc}\""
-
-                events.append({
-                    "dt": dt_local,
-                    "event_type": "status_change",
-                    "detail": action_text
-                })
-
-            # 4. 模型 / Avatar 变更 (_feed_avatar)
-            elif "_feed_avatar" in tbl:
-                avatar_name = item.get("avatar_name") or "未知模型"
-                thumbnail = item.get("current_avatar_thumbnail_image_url") or item.get("current_avatar_image_url") or ""
-                
-                events.append({
-                    "dt": dt_local,
-                    "event_type": "avatar_change",
-                    "avatar_name": str(avatar_name),
-                    "thumbnail": str(thumbnail),
-                    "detail": f"更换模型为 [{avatar_name}]"
-                })
-
-            # 5. Bio 个人简介修改 (_feed_bio)
-            elif "_feed_bio" in tbl:
-                bio_text = item.get("bio") or ""
-                events.append({
-                    "dt": dt_local,
-                    "event_type": "bio_change",
-                    "detail": f"更新个人 Bio 简介: \"{bio_text}\""
-                })
+            events_by_date.setdefault(date_str, []).append({
+                "raw_time": dt,
+                "time": time_str,
+                "event_type": "bio_change",
+                "action": f"修改个人简介 Bio: {row[1]}"
+            })
 
     conn.close()
 
-    events.sort(key=lambda x: x["dt"])
+    final_output = []
+    for date_key in sorted(events_by_date.keys(), reverse=True):
+        day_events = sorted(events_by_date[date_key], key=lambda x: x["raw_time"])
+        for e in day_events:
+            del e["raw_time"]
 
-    grouped_data = {}
-    for i in range(len(events)):
-        curr = events[i]
-        dt = curr["dt"]
-        date_key = dt.strftime("%Y-%m-%d")
-        time_hm = dt.strftime("%H:%M:%S")
-
-        if date_key not in grouped_data:
-            grouped_data[date_key] = []
-
-        if curr["event_type"] == "world_change":
-            duration_str = "至今 / 停留中"
-            for j in range(i + 1, len(events)):
-                if events[j]["event_type"] == "world_change":
-                    next_dt = events[j]["dt"]
-                    time_diff_seconds = (next_dt - dt).total_seconds()
-                    duration_str = format_duration(time_diff_seconds)
-                    break
-
-            grouped_data[date_key].append({
-                "time": time_hm,
-                "event_type": "world_change",
-                "world": curr["world"],
-                "duration": duration_str
-            })
-        elif curr["event_type"] == "avatar_change":
-            grouped_data[date_key].append({
-                "time": time_hm,
-                "event_type": "avatar_change",
-                "avatar_name": curr["avatar_name"],
-                "thumbnail": curr["thumbnail"],
-                "action": curr["detail"]
-            })
-        else:
-            grouped_data[date_key].append({
-                "time": time_hm,
-                "event_type": curr["event_type"],
-                "action": curr["detail"]
-            })
-
-    return grouped_data
-
-def update_site_data():
-    grouped_data = get_full_activity_data()
-    if not grouped_data:
-        return
-
-    os.makedirs(os.path.dirname(OUTPUT_JSON), exist_ok=True)
-    
-    history = []
-    for date_key in sorted(grouped_data.keys(), reverse=True):
-        history.append({
+        final_output.append({
             "date": date_key,
-            "timeline": grouped_data[date_key]
+            "timeline": day_events
         })
 
+    os.makedirs(DATA_DIR, exist_ok=True)
     with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
-
-    print(f"[{datetime.now()}] 多维度轨迹 JSON 刷新成功 -> {OUTPUT_JSON}")
+        json.dump(final_output, f, ensure_ascii=False, indent=2)
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--loop":
-        sec = int(sys.argv[2]) if len(sys.argv) > 2 else 10
-        print(f"开启后台守护模式，每 {sec} 秒轮询一次...")
-        while True:
-            update_site_data()
-            time.sleep(sec)
-    else:
-        update_site_data()
-EOF
+    process_data()
+PYEOF
 
-chown "$RDP_USER:$RDP_USER" "$APP_DIR/export_daily.py"
+echo "✅ 基础环境搭建完成！即将自动调用交互式配置脚本..."
+sleep 1
 
-# 清理现有的定时任务和后台进程
-crontab -l 2>/dev/null | grep -Fv "export_daily.py" | crontab - || true
-pkill -f "export_daily.py" || true
-
-# 配置轮询与启动模式
-if [ "$INTERVAL_TYPE" == "3" ]; then
-    nohup python3 "$APP_DIR/export_daily.py" --loop "$INTERVAL_VAL" > "$APP_DIR/daemon.log" 2>&1 &
-    (crontab -l 2>/dev/null ; echo "@reboot nohup /usr/bin/python3 $APP_DIR/export_daily.py --loop $INTERVAL_VAL > $APP_DIR/daemon.log 2>&1 &") | crontab -
-else
-    if [ "$INTERVAL_TYPE" == "2" ]; then
-        CRON_EXPR="0 */$INTERVAL_VAL * * *"
-    else
-        CRON_EXPR="*/$INTERVAL_VAL * * * *"
-    fi
-    CRON_JOB="$CRON_EXPR /usr/bin/python3 $APP_DIR/export_daily.py > /dev/null 2>&1"
-    (crontab -l 2>/dev/null ; echo "$CRON_JOB") | crontab -
+# 首次自动启动配置脚本
+chmod +x "$APP_DIR/config_logger.sh" 2>/dev/null || true
+if [ -f "$APP_DIR/config_logger.sh" ]; then
+    bash "$APP_DIR/config_logger.sh"
 fi
-
-echo "========================================================="
-echo " 🎉 部署完成！"
-echo " "
-echo " 📄 生成的轨迹 JSON 文件路径:"
-echo "    $TARGET_OUTPUT_JSON"
-echo " "
-echo " ⏱️ 当前设置的轮询频率: $ECHO_FREQ"
-echo " ⚙️ 登录与运行步骤:"
-echo " 1. 使用 RDP 连接 IP，账号: $RDP_USER / 密码: $RDP_PASS"
-echo " 2. 打开 Terminal 运行:"
-echo "    $APP_DIR/squashfs-root/vrcx --no-sandbox"
-echo " 3. 登录账号后，全量动态将按 [$ECHO_FREQ] 自动写入 JSON！"
-echo "========================================================="
