@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 # VRChat Track Logger 一键纯环境部署脚本
-# 作用：安装系统依赖、获取 VRCX (支持自动下载/自定义链接/手动放置)、生成底层运行环境
+# 作用：安装系统依赖、获取 VRCX (预先提供多种下载/放置途径)、生成底层运行环境
 # 说明：仅需在全新的容器/系统上运行一次！
 # ==============================================================================
 
@@ -30,68 +30,53 @@ apt install -y wget curl unzip xfce4 xrdp python3 python3-pip sqlite3 jq tzdata
 timedatectl set-timezone Asia/Shanghai || true
 systemctl enable --now xrdp 2>/dev/null || true
 
-echo -e "\n🔍 2. 获取并准备 VRCX AppImage 运行文件..."
+echo -e "\n📦 2. 选择 VRCX 运行环境获取方式..."
+cd "$APP_DIR"
+
+# 获取 CPU 架构匹配正则
 ARCH=$(uname -m)
 if [ "$ARCH" = "x86_64" ]; then
     REGEX="x86_64.*AppImage$"
 elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
     REGEX="arm64.*AppImage$"
 else
-    echo "⚠️ 无法自动识别系统架构 ($ARCH)，将切换至手动模式。"
     REGEX=""
 fi
 
-cd "$APP_DIR"
-
-# 获取在线直连函数
-get_latest_url() {
-    if [ -n "$REGEX" ]; then
-        curl -s https://api.github.com/repos/vrcx-team/VRCX/releases/latest | jq -r ".assets[] | select(.name | test(\"$REGEX\")) | .browser_download_url" 2>/dev/null || echo ""
-    fi
-}
-
-LATEST_URL=$(get_latest_url)
-
-# 下载/获取文件主逻辑
 download_success=false
 
 while [ "$download_success" = false ]; do
-    # 检查当前目录下是否已经有人提前放置了 VRCX.AppImage
-    if [ -f "$APP_DIR/VRCX.AppImage" ] || [ -f "$INSTALL_DIR/VRCX.AppImage" ]; then
-        if [ -f "$INSTALL_DIR/VRCX.AppImage" ] && [ ! -f "$APP_DIR/VRCX.AppImage" ]; then
-            mv "$INSTALL_DIR/VRCX.AppImage" "$APP_DIR/VRCX.AppImage"
-        fi
-        echo "✅ 检测到本地已存在 VRCX.AppImage 文件，直接使用本地文件！"
-        download_success=true
-        break
-    fi
-
-    if [ -n "$LATEST_URL" ] && [ "$LATEST_URL" != "null" ]; then
-        echo "🌐 已检测到 GitHub 最新下载地址: $LATEST_URL"
-        read -p "是否直接自动下载? (Y/n): " AUTO_DL
-        AUTO_DL="${AUTO_DL:-Y}"
-        if [[ "$AUTO_DL" =~ ^[Yy]$ ]]; then
-            echo "⬇️ 正在下载 VRCX.AppImage ..."
-            if wget -O VRCX.AppImage "$LATEST_URL"; then
-                download_success=true
-                break
-            else
-                echo "❌ 自动下载失败，可能网络受阻。"
-            fi
-        fi
-    fi
-
-    # 异常或备选选择菜单
-    echo -e "\n--------------------------------------------------"
-    echo "⚠️ 无法自动下载 VRCX，请选择获取方式："
-    echo " 1) 手动输入下载直连 (例如使用 GH-Proxy 代理链接)"
-    echo " 2) 我已通过其他途径下载，手动上传放置文件"
-    echo " 3) 重新尝试自动获取 GitHub 官方链接"
+    echo -e "\n请选择 VRCX 安装包获取途径："
+    echo " 1) 🌐 [自动推荐] 自动检测系统架构并从 GitHub 官方 Release 获取下载"
+    echo " 2) 🔗 [自定义链接] 输入自定义/镜像下载 URL (适合 GitHub 连通性不佳时)"
+    echo " 3) 📁 [手动放置] 使用本地已上传/放置好的 VRCX.AppImage"
     echo "--------------------------------------------------"
-    read -p "请输入选项 [1-3]: " CHOICE
+    read -p "请输入选项 [1-3, 默认 1]: " SOURCE_CHOICE
+    SOURCE_CHOICE="${SOURCE_CHOICE:-1}"
 
-    case "$CHOICE" in
+    case "$SOURCE_CHOICE" in
         1)
+            echo "🔍 正在从 GitHub API 获取最新 Release 链接..."
+            if [ -z "$REGEX" ]; then
+                echo "❌ 无法自动识别系统架构 ($ARCH)，请使用选项 2 或 3。"
+                continue
+            fi
+
+            LATEST_URL=$(curl -s https://api.github.com/repos/vrcx-team/VRCX/releases/latest | jq -r ".assets[] | select(.name | test(\"$REGEX\")) | .browser_download_url" 2>/dev/null || echo "")
+
+            if [ -n "$LATEST_URL" ] && [ "$LATEST_URL" != "null" ]; then
+                echo "🌐 获取到下载地址: $LATEST_URL"
+                echo "⬇️ 正在下载 VRCX.AppImage ..."
+                if wget -O VRCX.AppImage "$LATEST_URL"; then
+                    download_success=true
+                else
+                    echo "❌ 自动下载失败！可能是网络受阻，请尝试选项 2 或 3。"
+                fi
+            else
+                echo "❌ 无法从 GitHub 获取下载地址，请检查网络或 GitHub API 限制。"
+            fi
+            ;;
+        2)
             read -p "请输入 VRCX.AppImage 的完整下载 URL: " CUSTOM_URL
             if [ -n "$CUSTOM_URL" ]; then
                 echo "⬇️ 正在尝试从自定义链接下载..."
@@ -100,22 +85,28 @@ while [ "$download_success" = false ]; do
                 else
                     echo "❌ 从自定义链接下载失败，请检查 URL 是否有效。"
                 fi
+            else
+                echo "⚠️ URL 不能为空。"
             fi
             ;;
-        2)
-            echo -e "\n📌 【手动放置指引】："
-            echo "请将下载好的 VRCX AppImage 文件重命名为 'VRCX.AppImage'"
-            echo "并使用 SFTP / FlashFXP 等工具上传上传到以下任一路径："
-            echo "  👉 途径 A: $APP_DIR/VRCX.AppImage"
-            echo "  👉 途径 B: $INSTALL_DIR/VRCX.AppImage"
-            read -p "放置完成后，按 [Enter] 回车键继续检测..."
-            ;;
         3)
-            echo "🔄 重新尝试连接 GitHub API..."
-            LATEST_URL=$(get_latest_url)
+            # 检查当前或根目录下是否已有文件
+            if [ -f "$APP_DIR/VRCX.AppImage" ]; then
+                echo "✅ 在 $APP_DIR 找到了 VRCX.AppImage！"
+                download_success=true
+            elif [ -f "$INSTALL_DIR/VRCX.AppImage" ]; then
+                mv "$INSTALL_DIR/VRCX.AppImage" "$APP_DIR/VRCX.AppImage"
+                echo "✅ 在 $INSTALL_DIR 找到了 VRCX.AppImage 并移至应用目录！"
+                download_success=true
+            else
+                echo -e "\n📌 未检测到文件，请按照以下路径上传："
+                echo "   把你的 VRCX 部署包重命名为 'VRCX.AppImage'"
+                echo "   并放置到：$APP_DIR/VRCX.AppImage"
+                read -p "放置完成后，按 [Enter] 回车键重新检测..."
+            fi
             ;;
         *)
-            echo "❌ 无效选项，请重新选择。"
+            echo "❌ 无效选项，请重新输入。"
             ;;
     esac
 done
