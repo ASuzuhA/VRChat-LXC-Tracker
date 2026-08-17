@@ -1,0 +1,385 @@
+#!/bin/bash
+# ==============================================================================
+# VRChat Track Logger 一键纯环境部署脚本
+# 作用：安装系统依赖、获取 VRCX (支持自动下载/自定义链接/手动放置)、生成底层运行环境
+# 说明：仅需在全新的容器/系统上运行一次！
+# ==============================================================================
+
+set -e
+
+echo "=================================================="
+echo "    VRChat Track Logger 环境部署 (仅首次运行)"
+echo "=================================================="
+
+# 默认安装绝对路径
+DEFAULT_INSTALL_DIR="$HOME"
+read -p "请输入部署根目录绝对路径 [默认: $DEFAULT_INSTALL_DIR]: " INSTALL_DIR
+INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
+INSTALL_DIR=$(eval echo "$INSTALL_DIR")
+
+APP_DIR="$INSTALL_DIR/vrcx"
+DATA_DIR="$INSTALL_DIR/vrcx_data"
+mkdir -p "$APP_DIR" "$DATA_DIR"
+
+echo -e "\n⏳ 1. 正在更新系统软件包并安装基础依赖..."
+export DEBIAN_FRONTEND=noninteractive
+apt update && apt upgrade -y
+apt install -y wget curl unzip xfce4 xrdp python3 python3-pip sqlite3 jq tzdata
+
+# 设置系统时区为 Asia/Shanghai (UTC+8)
+timedatectl set-timezone Asia/Shanghai || true
+systemctl enable --now xrdp 2>/dev/null || true
+
+echo -e "\n🔍 2. 获取并准备 VRCX AppImage 运行文件..."
+ARCH=$(uname -m)
+if [ "$ARCH" = "x86_64" ]; then
+    REGEX="x86_64.*AppImage$"
+elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+    REGEX="arm64.*AppImage$"
+else
+    echo "⚠️ 无法自动识别系统架构 ($ARCH)，将切换至手动模式。"
+    REGEX=""
+fi
+
+cd "$APP_DIR"
+
+# 获取在线直连函数
+get_latest_url() {
+    if [ -n "$REGEX" ]; then
+        curl -s https://api.github.com/repos/vrcx-team/VRCX/releases/latest | jq -r ".assets[] | select(.name | test(\"$REGEX\")) | .browser_download_url" 2>/dev/null || echo ""
+    fi
+}
+
+LATEST_URL=$(get_latest_url)
+
+# 下载/获取文件主逻辑
+download_success=false
+
+while [ "$download_success" = false ]; do
+    # 检查当前目录下是否已经有人提前放置了 VRCX.AppImage
+    if [ -f "$APP_DIR/VRCX.AppImage" ] || [ -f "$INSTALL_DIR/VRCX.AppImage" ]; then
+        if [ -f "$INSTALL_DIR/VRCX.AppImage" ] && [ ! -f "$APP_DIR/VRCX.AppImage" ]; then
+            mv "$INSTALL_DIR/VRCX.AppImage" "$APP_DIR/VRCX.AppImage"
+        fi
+        echo "✅ 检测到本地已存在 VRCX.AppImage 文件，直接使用本地文件！"
+        download_success=true
+        break
+    fi
+
+    if [ -n "$LATEST_URL" ] && [ "$LATEST_URL" != "null" ]; then
+        echo "🌐 已检测到 GitHub 最新下载地址: $LATEST_URL"
+        read -p "是否直接自动下载? (Y/n): " AUTO_DL
+        AUTO_DL="${AUTO_DL:-Y}"
+        if [[ "$AUTO_DL" =~ ^[Yy]$ ]]; then
+            echo "⬇️ 正在下载 VRCX.AppImage ..."
+            if wget -O VRCX.AppImage "$LATEST_URL"; then
+                download_success=true
+                break
+            else
+                echo "❌ 自动下载失败，可能网络受阻。"
+            fi
+        fi
+    fi
+
+    # 异常或备选选择菜单
+    echo -e "\n--------------------------------------------------"
+    echo "⚠️ 无法自动下载 VRCX，请选择获取方式："
+    echo " 1) 手动输入下载直连 (例如使用 GH-Proxy 代理链接)"
+    echo " 2) 我已通过其他途径下载，手动上传放置文件"
+    echo " 3) 重新尝试自动获取 GitHub 官方链接"
+    echo "--------------------------------------------------"
+    read -p "请输入选项 [1-3]: " CHOICE
+
+    case "$CHOICE" in
+        1)
+            read -p "请输入 VRCX.AppImage 的完整下载 URL: " CUSTOM_URL
+            if [ -n "$CUSTOM_URL" ]; then
+                echo "⬇️ 正在尝试从自定义链接下载..."
+                if wget -O VRCX.AppImage "$CUSTOM_URL"; then
+                    download_success=true
+                else
+                    echo "❌ 从自定义链接下载失败，请检查 URL 是否有效。"
+                fi
+            fi
+            ;;
+        2)
+            echo -e "\n📌 【手动放置指引】："
+            echo "请将下载好的 VRCX AppImage 文件重命名为 'VRCX.AppImage'"
+            echo "并使用 SFTP / FlashFXP 等工具上传上传到以下任一路径："
+            echo "  👉 途径 A: $APP_DIR/VRCX.AppImage"
+            echo "  👉 途径 B: $INSTALL_DIR/VRCX.AppImage"
+            read -p "放置完成后，按 [Enter] 回车键继续检测..."
+            ;;
+        3)
+            echo "🔄 重新尝试连接 GitHub API..."
+            LATEST_URL=$(get_latest_url)
+            ;;
+        *)
+            echo "❌ 无效选项，请重新选择。"
+            ;;
+    esac
+done
+
+chmod +x VRCX.AppImage
+
+echo "📦 正在解压 VRCX 免安装绿色运行环境..."
+rm -rf squashfs-root
+./VRCX.AppImage --appimage-extract
+
+# 3. 初始化默认配置文件 (config.json)
+if [ ! -f "$APP_DIR/config.json" ]; then
+    cat <<JSON > "$APP_DIR/config.json"
+{
+  "target_user_id": "",
+  "cron_minutes": 5,
+  "log_status": true,
+  "log_world": true,
+  "log_avatar": true,
+  "log_bio": true
+}
+JSON
+fi
+
+# 4. 生成底层的 Python 解析核心 (export_daily.py)
+cat << 'PYEOF' > "$APP_DIR/export_daily.py"
+import os
+import sys
+import json
+import sqlite3
+from datetime import datetime, timezone, timedelta
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(APP_DIR, "config.json")
+DATA_DIR = os.path.join(os.path.dirname(APP_DIR), "vrcx_data")
+OUTPUT_JSON = os.path.join(DATA_DIR, "data.json")
+
+HOME_DIR = os.path.expanduser("~")
+DB_PATH = os.path.join(HOME_DIR, ".config", "VRCX", "VRCX.sqlite3")
+
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def get_beijing_time(utc_str):
+    if not utc_str: return None
+    try:
+        utc_str = str(utc_str).replace('T', ' ').split('.')[0]
+        dt = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone(timedelta(hours=8)))
+    except Exception:
+        return None
+
+def find_table(cursor, suffix):
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?", (f"%_{suffix}",))
+    rows = cursor.fetchall()
+    return [r[0] for r in rows]
+
+def format_duration(seconds):
+    if seconds < 60:
+        return f"{int(seconds)}秒"
+    elif seconds < 3600:
+        mins = int(seconds // 60)
+        return f"{mins}分钟"
+    else:
+        hours = int(seconds // 3600)
+        mins = int((seconds % 3600) // 60)
+        return f"{hours}小时{mins}分钟" if mins > 0 else f"{hours}小时"
+
+def process_data():
+    cfg = load_config()
+    target_user_id = cfg.get("target_user_id", "").strip()
+
+    if not target_user_id or not os.path.exists(DB_PATH):
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    events_by_date = {}
+
+    # 1. 状态变动记录 (feed_status / feed_online_offline)
+    if cfg.get("log_status", True):
+        for table in find_table(cursor, "feed_status") + find_table(cursor, "feed_online_offline"):
+            try:
+                cursor.execute(f"PRAGMA table_info('{table}')")
+                cols = [c[1] for c in cursor.fetchall()]
+                
+                user_col = "user_id" if "user_id" in cols else "userId"
+                time_col = "created_at" if "created_at" in cols else ("created" if "created" in cols else "timestamp")
+                
+                if user_col in cols and time_col in cols:
+                    cursor.execute(f"SELECT * FROM '{table}' WHERE {user_col} = ?", (target_user_id,))
+                    for row in cursor.fetchall():
+                        dt = get_beijing_time(row[cols.index(time_col)])
+                        if not dt: continue
+                        date_str = dt.strftime("%Y-%m-%d")
+                        time_str = dt.strftime("%H:%M:%S")
+
+                        status_val = str(row[cols.index("status")]) if "status" in cols else ""
+                        desc_val = str(row[cols.index("status_description")]) if "status_description" in cols else ""
+                        
+                        if status_val in ["None", "null", "NoneType", ""]:
+                            status_val = ""
+                        if desc_val in ["None", "null", "NoneType", ""]:
+                            desc_val = ""
+
+                        # 过滤无状态无签名的冗余日志
+                        if not status_val and not desc_val:
+                            continue
+
+                        action_text = f"状态变动: {status_val}" if status_val else "状态签名更新"
+                        if desc_val:
+                            action_text += f" - 签名: \"{desc_val}\""
+
+                        events_by_date.setdefault(date_str, []).append({
+                            "raw_time": dt,
+                            "time": time_str,
+                            "event_type": "status_change",
+                            "action": action_text
+                        })
+            except Exception:
+                pass
+
+    # 2. 房间 GPS 位置记录 (feed_gps)
+    if cfg.get("log_world", True):
+        for table in find_table(cursor, "feed_gps"):
+            try:
+                cursor.execute(f"PRAGMA table_info('{table}')")
+                cols = [c[1] for c in cursor.fetchall()]
+                
+                user_col = "user_id" if "user_id" in cols else "userId"
+                time_col = "created_at" if "created_at" in cols else ("created" if "created" in cols else "timestamp")
+
+                if user_col in cols and time_col in cols:
+                    cursor.execute(f"SELECT * FROM '{table}' WHERE {user_col} = ?", (target_user_id,))
+                    for row in cursor.fetchall():
+                        dt = get_beijing_time(row[cols.index(time_col)])
+                        if not dt: continue
+                        date_str = dt.strftime("%Y-%m-%d")
+                        time_str = dt.strftime("%H:%M:%S")
+
+                        world_name = str(row[cols.index("world_name")]) if "world_name" in cols else "未知房间"
+                        
+                        events_by_date.setdefault(date_str, []).append({
+                            "raw_time": dt,
+                            "time": time_str,
+                            "event_type": "world_change",
+                            "world": world_name
+                        })
+            except Exception:
+                pass
+
+    # 3. 更换 Avatar 模型 (feed_avatar 或 avatar_history)
+    if cfg.get("log_avatar", True):
+        for table in find_table(cursor, "feed_avatar") + find_table(cursor, "avatar_history"):
+            try:
+                cursor.execute(f"PRAGMA table_info('{table}')")
+                cols = [c[1] for c in cursor.fetchall()]
+
+                user_col = "user_id" if "user_id" in cols else "userId"
+                time_col = "created_at" if "created_at" in cols else ("created" if "created" in cols else "timestamp")
+
+                if user_col in cols and time_col in cols:
+                    cursor.execute(f"SELECT * FROM '{table}' WHERE {user_col} = ?", (target_user_id,))
+                    for row in cursor.fetchall():
+                        dt = get_beijing_time(row[cols.index(time_col)])
+                        if not dt: continue
+                        date_str = dt.strftime("%Y-%m-%d")
+                        time_str = dt.strftime("%H:%M:%S")
+
+                        avatar_name = str(row[cols.index("avatar_name")]) if "avatar_name" in cols else "未知 Avatar"
+                        thumb = str(row[cols.index("thumbnail_url")]) if "thumbnail_url" in cols else ""
+
+                        events_by_date.setdefault(date_str, []).append({
+                            "raw_time": dt,
+                            "time": time_str,
+                            "event_type": "avatar_change",
+                            "avatar_name": avatar_name,
+                            "thumbnail": thumb if thumb != "None" else "",
+                            "action": f"更换模型为 [{avatar_name}]"
+                        })
+            except Exception:
+                pass
+
+    # 4. 修改 Bio 简介 (feed_bio)
+    if cfg.get("log_bio", True):
+        for table in find_table(cursor, "feed_bio"):
+            try:
+                cursor.execute(f"PRAGMA table_info('{table}')")
+                cols = [c[1] for c in cursor.fetchall()]
+
+                user_col = "user_id" if "user_id" in cols else "userId"
+                time_col = "created_at" if "created_at" in cols else ("created" if "created" in cols else "timestamp")
+
+                if user_col in cols and time_col in cols:
+                    cursor.execute(f"SELECT * FROM '{table}' WHERE {user_col} = ?", (target_user_id,))
+                    for row in cursor.fetchall():
+                        dt = get_beijing_time(row[cols.index(time_col)])
+                        if not dt: continue
+                        date_str = dt.strftime("%Y-%m-%d")
+                        time_str = dt.strftime("%H:%M:%S")
+
+                        bio_text = str(row[cols.index("bio")]) if "bio" in cols else ""
+
+                        events_by_date.setdefault(date_str, []).append({
+                            "raw_time": dt,
+                            "time": time_str,
+                            "event_type": "bio_change",
+                            "action": f"修改个人简介 Bio: {bio_text}"
+                        })
+            except Exception:
+                pass
+
+    conn.close()
+
+    # 全局时间排序
+    all_events = []
+    for d, evts in events_by_date.items():
+        all_events.extend(evts)
+    all_events.sort(key=lambda x: x["raw_time"])
+
+    # 动态计算停留时长
+    world_events = [e for e in all_events if e["event_type"] == "world_change"]
+    for i in range(len(world_events)):
+        curr_e = world_events[i]
+        if i < len(world_events) - 1:
+            next_e = world_events[i+1]
+            diff_sec = (next_e["raw_time"] - curr_e["raw_time"]).total_seconds()
+            curr_e["duration"] = format_duration(diff_sec)
+        else:
+            curr_e["duration"] = "至今 / 未离场"
+
+    # 按日期分组整理输出
+    final_output = []
+    grouped_by_date = {}
+    for e in all_events:
+        d_str = e["raw_time"].strftime("%Y-%m-%d")
+        del e["raw_time"]
+        grouped_by_date.setdefault(d_str, []).append(e)
+
+    for date_key in sorted(grouped_by_date.keys(), reverse=True):
+        final_output.append({
+            "date": date_key,
+            "timeline": grouped_by_date[date_key]
+        })
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
+        json.dump(final_output, f, ensure_ascii=False, indent=2)
+
+if __name__ == "__main__":
+    process_data()
+PYEOF
+
+echo "✅ 基础环境搭建完成！即将自动调用交互式配置脚本..."
+sleep 1
+
+# 首次自动启动配置脚本
+chmod +x "$APP_DIR/config_logger.sh" 2>/dev/null || true
+if [ -f "$APP_DIR/config_logger.sh" ]; then
+    bash "$APP_DIR/config_logger.sh"
+fi
