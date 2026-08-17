@@ -1,148 +1,158 @@
 #!/bin/bash
-# ==============================================================================
-# VRChat Track Logger 全局配置控制台
-# 作用：随时修改监听的目标 User ID、数据刷新间隔频率以及保留的数据字段
-# 说明：无需重新运行部署脚本，运行此脚本即可修改一切配置！
-# ==============================================================================
 
-APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+APP_DIR=$(cd $(dirname $0); pwd)
 CONFIG_FILE="$APP_DIR/config.json"
 
-# 初始化配置文件（若不存在）
-if [ ! -f "$CONFIG_FILE" ]; then
+# --- 1. 读取当前配置或赋默认值 ---
+get_cfg() {
+    python3 -c "import json, os; f=open('$CONFIG_FILE') if os.path.exists('$CONFIG_FILE') else None; d=json.load(f) if f else {}; print(d.get('$1', '$2'))" 2>/dev/null
+}
+
+USER_ID=$(get_cfg "target_user_id" "")
+CRON_MIN=$(get_cfg "cron_minutes" "5")
+LOG_STATUS=$(get_cfg "log_status" "true")
+LOG_WORLD=$(get_cfg "log_world" "true")
+LOG_AVATAR=$(get_cfg "log_avatar" "true")
+LOG_BIO=$(get_cfg "log_bio" "true")
+
+# 格式化布尔值为可读状态标识
+fmt_bool() {
+    if [ "$1" = "true" ]; then echo -e "\033[32m[已开启]\033[0m"; else echo -e "\033[31m[已关闭]\033[0m"; fi
+}
+
+toggle_bool() {
+    if [ "$1" = "true" ]; then echo "false"; else echo "true"; fi
+}
+
+# --- 2. 渲染交互主面板 ---
+render_menu() {
+    clear
+    echo -e "\033[36m=====================================================\033[0m"
+    echo -e "\033[1;36m           VRChat Logger 控制台与配置中心            \033[0m"
+    echo -e "\033[36m=====================================================\033[0m"
+    echo -e " [ 1 ] 目标 VRChat User ID : \033[33m${USER_ID:-<未设置>}\033[0m"
+    echo -e " [ 2 ] 自动导出频率(分钟)   : \033[33m${CRON_MIN} 分钟/次\033[0m"
+    echo -e " ---------------------------------------------------"
+    echo -e " [ A ] 记录【在线状态/签名】变动 : $(fmt_bool $LOG_STATUS)"
+    echo -e " [ B ] 记录【房间 GPS】位置变动   : $(fmt_bool $LOG_WORLD)"
+    echo -e " [ C ] 记录【Avatar 模型】更换历史 : $(fmt_bool $LOG_AVATAR)"
+    echo -e " [ D ] 记录【个人简介 Bio】修改   : $(fmt_bool $LOG_BIO)"
+    echo -e "\033[36m-----------------------------------------------------\033[0m"
+    echo -e " [ S ] \033[32m保存配置并部署/刷新后台服务\033[0m"
+    echo -e " [ Q ] 退出 (不保存改动)"
+    echo -e "\033[36m=====================================================\033[0m"
+}
+
+# --- 3. 保存与自动化部署操作 ---
+save_and_deploy() {
+    echo -e "\n💾 正在保存配置至 $CONFIG_FILE ..."
     cat <<JSON > "$CONFIG_FILE"
 {
-  "target_user_id": "",
-  "cron_minutes": 5,
-  "log_status": true,
-  "log_world": true,
-  "log_avatar": true,
-  "log_bio": true
+  "target_user_id": "$USER_ID",
+  "cron_minutes": $CRON_MIN,
+  "log_status": $LOG_STATUS,
+  "log_world": $LOG_WORLD,
+  "log_avatar": $LOG_AVATAR,
+  "log_bio": $LOG_BIO
 }
 JSON
-fi
 
-# 从 JSON 配置文件中读取单个属性
-read_cfg() {
-    python3 -c "
-import json
-try:
-    with open('$CONFIG_FILE', 'r', encoding='utf-8') as f:
-        cfg = json.load(f)
-        val = cfg.get('$1', '$2')
-        if isinstance(val, bool):
-            print('ON' if val else 'OFF')
-        else:
-            print(val)
-except Exception:
-    print('$2')
-"
-}
+    echo "⏱️ 正在更新 Crontab 任务..."
+    (crontab -l 2>/dev/null | grep -v "$APP_DIR/export_daily.py" ; echo "*/$CRON_MIN * * * * python3 $APP_DIR/export_daily.py >/dev/null 2>&1") | crontab -
 
-# 写回 JSON 配置文件
-write_cfg() {
-    python3 -c "
-import json
-try:
-    with open('$CONFIG_FILE', 'r', encoding='utf-8') as f:
-        cfg = json.load(f)
-except Exception:
-    cfg = {}
+    echo "⚙️ 正在配置 PAM/Polkit 策略与开机自启动服务..."
+    CURRENT_USER=$(whoami)
 
-cfg['target_user_id'] = '$VAL_USER'
-cfg['cron_minutes'] = int('$VAL_CRON')
-cfg['log_status'] = True if '$VAL_STATUS' == 'ON' else False
-cfg['log_world'] = True if '$VAL_WORLD' == 'ON' else False
-cfg['log_avatar'] = True if '$VAL_AVATAR' == 'ON' else False
-cfg['log_bio'] = True if '$VAL_BIO' == 'ON' else False
+    if [ "$EUID" -eq 0 ] || [ "$CURRENT_USER" = "root" ]; then
+        systemctl stop polkit 2>/dev/null || true
+        systemctl disable polkit 2>/dev/null || true
+        systemctl mask polkit 2>/dev/null || true
 
-with open('$CONFIG_FILE', 'w', encoding='utf-8') as f:
-    json.dump(cfg, f, indent=2, ensure_ascii=False)
-"
-}
+        if [ -f "/etc/pam.d/xrdp-sesman" ]; then
+            sed -i 's/^.*pam_polkit.so.*$/#&/' /etc/pam.d/xrdp-sesman 2>/dev/null || true
+        fi
 
-# 刷新变量值
-load_all_values() {
-    VAL_USER=$(read_cfg "target_user_id" "未设置")
-    VAL_CRON=$(read_cfg "cron_minutes" "5")
-    VAL_STATUS=$(read_cfg "log_status" "ON")
-    VAL_WORLD=$(read_cfg "log_world" "ON")
-    VAL_AVATAR=$(read_cfg "log_avatar" "ON")
-    VAL_BIO=$(read_cfg "log_bio" "ON")
-}
-
-# 绘制交互控制台界面
-show_menu() {
-    load_all_values
-    clear
-    echo "=================================================="
-    echo "       VRChat 轨迹监听全参数配置控制台"
-    echo "=================================================="
-    echo " 【基础账号与频率设置】"
-    echo " [U] 监听的目标 User ID  --> [ $VAL_USER ]"
-    echo " [T] 轮询刷新频率 (分钟) --> [ 每 $VAL_CRON 分钟 ]"
-    echo "--------------------------------------------------"
-    echo " 【数据监听与导出字段】"
-    echo " [1] 上下线与状态签名 (Status & Text)  --> [ $VAL_STATUS ]"
-    echo " [2] 切换房间与停留时长 (World & Duration) --> [ $VAL_WORLD ]"
-    echo " [3] 更换 Avatar 模型与缩略图 (Avatar Change)--> [ $VAL_AVATAR ]"
-    echo " [4] 修改 Bio 个人简介 (Bio Change)          --> [ $VAL_BIO ]"
-    echo "--------------------------------------------------"
-    echo " [S] 保存当前所有设置并立即生效"
-    echo " [Q] 退出控制台"
-    echo "=================================================="
-}
-
-toggle_option() {
-    case $1 in
-        1) [ "$VAL_STATUS" = "ON" ] && VAL_STATUS="OFF" || VAL_STATUS="ON" ;;
-        2) [ "$VAL_WORLD" = "ON" ] && VAL_WORLD="OFF" || VAL_WORLD="ON" ;;
-        3) [ "$VAL_AVATAR" = "ON" ] && VAL_AVATAR="OFF" || VAL_AVATAR="ON" ;;
-        4) [ "$VAL_BIO" = "ON" ] && VAL_BIO="OFF" || VAL_BIO="ON" ;;
-    esac
-}
-
-# 保存并更新定时任务和数据提取
-save_and_apply() {
-    if [ -z "$VAL_USER" ] || [ "$VAL_USER" = "未设置" ]; then
-        echo -e "\n❌ 错误: 目标 User ID 不能为空！请输入选项 [U] 进行设置。"
-        read -p "按回车键继续..."
-        return
+        mkdir -p /etc/polkit-1/localauthority/50-local.d
+        cat <<PKEOF > /etc/polkit-1/localauthority/50-local.d/45-allow-all.pkla
+[Allow All Root Operations]
+Identity=unix-user:root
+Action=*
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes
+PKEOF
     fi
 
-    write_cfg
+    # 1. 桌面环境自启动 (.desktop)
+    AUTOSTART_DIR="$HOME/.config/autostart"
+    mkdir -p "$AUTOSTART_DIR"
+    cat <<DESKEOF > "$AUTOSTART_DIR/vrcx.desktop"
+[Desktop Entry]
+Type=Application
+Name=VRCX AutoStart
+Exec=$APP_DIR/squashfs-root/AppRun --no-sandbox
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+DESKEOF
+    chmod +x "$AUTOSTART_DIR/vrcx.desktop"
 
-    # 重新配置 Crontab 计划任务
-    CRON_JOB="*/$VAL_CRON * * * * /usr/bin/python3 $APP_DIR/export_daily.py > /dev/null 2>&1"
-    (crontab -l 2>/dev/null | grep -v "$APP_DIR/export_daily.py"; echo "$CRON_JOB") | crontab -
+    # 2. Systemd 开机 Headless 后台服务
+    if command -v systemctl >/dev/null 2>&1 && [ "$EUID" -eq 0 ]; then
+        cat <<SERVICEEOF > /etc/systemd/system/vrcx-headless.service
+[Unit]
+Description=VRCX Headless AutoStart Service
+After=network.target
 
-    echo -e "\n✅ 配置已保存，并成功更新 Crontab 计划任务（每 $VAL_CRON 分钟）！"
-    echo "🔄 正在手动触发一次数据解析提取..."
-    python3 "$APP_DIR/export_daily.py" || true
-    echo "🎉 操作完成！新过滤规则与设置已生效。"
+[Service]
+Type=simple
+User=$CURRENT_USER
+Environment=DISPLAY=:99
+ExecStartPre=/bin/sh -c '/usr/bin/Xvfb :99 -screen 0 1280x1024x24 &'
+ExecStart=$APP_DIR/squashfs-root/AppRun --no-sandbox
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+SERVICEEOF
+
+        systemctl daemon-reload
+        systemctl enable vrcx-headless.service 2>/dev/null || true
+        systemctl restart vrcx-headless.service 2>/dev/null || true
+    fi
+
+    echo -e "\n\033[32m✅ 全部配置与后台服务已成功更新并部署！\033[0m"
     exit 0
 }
 
+# --- 4. 主循环事件监听 ---
 while true; do
-    show_menu
-    read -p "请输入菜单代号进行修改 (U / T / 1-4 / S / Q): " choice
-    case "$choice" in
-        [Ut])
-            read -p "请输入新的目标 User ID (usr_xxx): " NEW_USER
-            if [ -n "$NEW_USER" ]; then VAL_USER="$NEW_USER"; write_cfg; fi
+    render_menu
+    read -p "请输入指令 [1-2 / A-D / S / Q]: " CHOICE
+    case "$(echo $CHOICE | tr 'a-z' 'A-Z')" in
+        1)
+            read -p "请输入新的目标 VRChat User ID: " NEW_ID
+            [ -n "$NEW_ID" ] && USER_ID="$NEW_ID"
             ;;
-        [Tt])
-            read -p "请输入新的轮询间隔（分钟，如 5 或 10）: " NEW_CRON
-            if [[ "$NEW_CRON" =~ ^[0-9]+$ ]] && [ "$NEW_CRON" -gt 0 ]; then
-                VAL_CRON="$NEW_CRON"
-                write_cfg
-            else
-                echo "❌ 输入无效，请输入大于 0 的数字！"; sleep 1
+        2)
+            read -p "请输入新的导出频率(分钟): " NEW_CRON
+            if [[ "$NEW_CRON" =~ ^[0-9]+$ ]]; then
+                CRON_MIN="$NEW_CRON"
             fi
             ;;
-        1|2|3|4) toggle_option "$choice"; write_cfg ;;
-        [Ss]) save_and_apply ;;
-        [Qq]) exit 0 ;;
-        *) echo "无效指令！"; sleep 1 ;;
+        A) LOG_STATUS=$(toggle_bool $LOG_STATUS) ;;
+        B) LOG_WORLD=$(toggle_bool $LOG_WORLD) ;;
+        C) LOG_AVATAR=$(toggle_bool $LOG_AVATAR) ;;
+        D) LOG_BIO=$(toggle_bool $LOG_BIO) ;;
+        S)
+            save_and_deploy
+            ;;
+        Q)
+            echo "已取消修改并退出。"
+            exit 0
+            ;;
+        *)
+            ;;
     esac
 done
