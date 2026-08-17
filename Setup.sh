@@ -103,8 +103,8 @@ while [ "$download_success" = false ]; do
                 download_success=true
             else
                 echo -e "\n📌 未检测到文件，请按照以下路径上传："
-                echo "   把你的 VRCX 部署包重命名为 'VRCX.AppImage'"
-                echo "   并放置到：$APP_DIR/VRCX.AppImage"
+                echo "    把你的 VRCX 部署包重命名为 'VRCX.AppImage'"
+                echo "    并放置到：$APP_DIR/VRCX.AppImage"
                 read -p "放置完成后，按 [Enter] 回车键重新检测..."
             fi
             ;;
@@ -121,7 +121,8 @@ rm -rf squashfs-root
 ./VRCX.AppImage --appimage-extract
 
 # 3. 初始化默认配置文件 (config.json)
-if [ ! -f "$APP_DIR/config.json" ]; then
+CONFIG_PATH="$APP_DIR/config.json"
+if [ ! -f "$CONFIG_PATH" ]; then
     cat <<JSON > "$CONFIG_PATH"
 {
   "target_user_id": "",
@@ -357,43 +358,58 @@ if __name__ == "__main__":
     process_data()
 PYEOF
 
-# 5. 生成日常使用的交互式参数配置脚本 (config_logger.sh)
+chmod +x "$APP_DIR/export_daily.py"
+
+# 5. 生成日常使用的交互式参数配置脚本 (config_logger.sh) [更新为新版交互菜单]
 cat << 'CONFIGEOF' > "$APP_DIR/config_logger.sh"
 #!/bin/bash
 
 APP_DIR=$(cd $(dirname $0); pwd)
 CONFIG_FILE="$APP_DIR/config.json"
 
+# --- 1. 读取当前配置或赋默认值 ---
 get_cfg() {
-    python3 -c "import json; f=open('$CONFIG_FILE'); d=json.load(f); print(d.get('$1', ''))" 2>/dev/null
+    python3 -c "import json, os; f=open('$CONFIG_FILE') if os.path.exists('$CONFIG_FILE') else None; d=json.load(f) if f else {}; print(d.get('$1', '$2'))" 2>/dev/null
 }
 
-CURR_USER_ID=$(get_cfg "target_user_id")
-CURR_CRON=$(get_cfg "cron_minutes")
+USER_ID=$(get_cfg "target_user_id" "")
+CRON_MIN=$(get_cfg "cron_minutes" "5")
+LOG_STATUS=$(get_cfg "log_status" "true")
+LOG_WORLD=$(get_cfg "log_world" "true")
+LOG_AVATAR=$(get_cfg "log_avatar" "true")
+LOG_BIO=$(get_cfg "log_bio" "true")
 
-echo "=========================================="
-echo "      VRChat Logger 交互式参数配置"
-echo "=========================================="
+fmt_bool() {
+    if [ "$1" = "true" ]; then echo -e "\033[32m[已开启]\033[0m"; else echo -e "\033[31m[已关闭]\033[0m"; fi
+}
 
-read -p "请输入追踪的目标 VRChat User ID [$CURR_USER_ID]: " USER_ID
-USER_ID="${USER_ID:-$CURR_USER_ID}"
+toggle_bool() {
+    if [ "$1" = "true" ]; then echo "false"; else echo "true"; fi
+}
 
-read -p "请输入后台自动导出的时间间隔(分钟) [默认: ${CURR_CRON:-5}]: " CRON_MIN
-CRON_MIN="${CRON_MIN:-${CURR_CRON:-5}}"
+# --- 2. 渲染交互主面板 ---
+render_menu() {
+    clear
+    echo -e "\033[36m=====================================================\033[0m"
+    echo -e "\033[1;36m           VRChat Logger 控制台与配置中心            \033[0m"
+    echo -e "\033[36m=====================================================\033[0m"
+    echo -e " [ 1 ] 目标 VRChat User ID : \033[33m${USER_ID:-<未设置>}\033[0m"
+    echo -e " [ 2 ] 自动导出频率(分钟)   : \033[33m${CRON_MIN} 分钟/次\033[0m"
+    echo -e " ---------------------------------------------------"
+    echo -e " [ A ] 记录【在线状态/签名】变动 : $(fmt_bool $LOG_STATUS)"
+    echo -e " [ B ] 记录【房间 GPS】位置变动   : $(fmt_bool $LOG_WORLD)"
+    echo -e " [ C ] 记录【Avatar 模型】更换历史 : $(fmt_bool $LOG_AVATAR)"
+    echo -e " [ D ] 记录【个人简介 Bio】修改   : $(fmt_bool $LOG_BIO)"
+    echo -e "\033[36m-----------------------------------------------------\033[0m"
+    echo -e " [ S ] \033[32m保存配置并部署/刷新后台服务\033[0m"
+    echo -e " [ Q ] 退出 (不保存改动)"
+    echo -e "\033[36m=====================================================\033[0m"
+}
 
-read -p "是否记录【在线状态/签名】变动? (Y/n): " LOG_STATUS
-LOG_STATUS=$(echo "${LOG_STATUS:-Y}" | grep -iq "^y" && echo "true" || echo "false")
-
-read -p "是否记录【更换房间 GPS】位置? (Y/n): " LOG_WORLD
-LOG_WORLD=$(echo "${LOG_WORLD:-Y}" | grep -iq "^y" && echo "true" || echo "false")
-
-read -p "是否记录【更换 Avatar 模型】历史? (Y/n): " LOG_LOG_AVATAR
-LOG_AVATAR=$(echo "${LOG_LOG_AVATAR:-Y}" | grep -iq "^y" && echo "true" || echo "false")
-
-read -p "是否记录【修改 Bio 简介】记录? (Y/n): " LOG_BIO
-LOG_BIO=$(echo "${LOG_BIO:-Y}" | grep -iq "^y" && echo "true" || echo "false")
-
-cat <<JSON > "$CONFIG_FILE"
+# --- 3. 保存与自动化部署操作 ---
+save_and_deploy() {
+    echo -e "\n💾 正在保存配置至 $CONFIG_FILE ..."
+    cat <<JSON > "$CONFIG_FILE"
 {
   "target_user_id": "$USER_ID",
   "cron_minutes": $CRON_MIN,
@@ -404,11 +420,43 @@ cat <<JSON > "$CONFIG_FILE"
 }
 JSON
 
-(crontab -l 2>/dev/null | grep -v "$APP_DIR/export_daily.py" ; echo "*/$CRON_MIN * * * * python3 $APP_DIR/export_daily.py >/dev/null 2>&1") | crontab -
+    echo "⏱️ 正在更新 Crontab 任务..."
+    (crontab -l 2>/dev/null | grep -v "$APP_DIR/export_daily.py" ; echo "*/$CRON_MIN * * * * python3 $APP_DIR/export_daily.py >/dev/null 2>&1") | crontab -
 
-echo "------------------------------------------"
-echo "✅ 参数更新完毕！当前追踪 Target ID: $USER_ID"
-echo "=========================================="
+    echo -e "\n\033[32m✅ 配置已保存，后台定时任务刷新成功！\033[0m"
+    exit 0
+}
+
+# --- 4. 主循环事件监听 ---
+while true; do
+    render_menu
+    read -p "请输入指令 [1-2 / A-D / S / Q]: " CHOICE
+    case "$(echo $CHOICE | tr 'a-z' 'A-Z')" in
+        1)
+            read -p "请输入新的目标 VRChat User ID: " NEW_ID
+            [ -n "$NEW_ID" ] && USER_ID="$NEW_ID"
+            ;;
+        2)
+            read -p "请输入新的导出频率(分钟): " NEW_CRON
+            if [[ "$NEW_CRON" =~ ^[0-9]+$ ]]; then
+                CRON_MIN="$NEW_CRON"
+            fi
+            ;;
+        A) LOG_STATUS=$(toggle_bool $LOG_STATUS) ;;
+        B) LOG_WORLD=$(toggle_bool $LOG_WORLD) ;;
+        C) LOG_AVATAR=$(toggle_bool $LOG_AVATAR) ;;
+        D) LOG_BIO=$(toggle_bool $LOG_BIO) ;;
+        S)
+            save_and_deploy
+            ;;
+        Q)
+            echo "已取消修改并退出。"
+            exit 0
+            ;;
+        *)
+            ;;
+    esac
+done
 CONFIGEOF
 
 chmod +x "$APP_DIR/config_logger.sh"
