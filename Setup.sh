@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 # VRChat Track Logger 一键纯环境部署脚本
-# 作用：安装系统依赖、获取 VRCX (预先提供多种下载/放置途径)、生成底层运行环境
+# 作用：安装系统依赖、获取 VRCX (预先提供多种下载/放置途径)、生成全部核心脚本
 # 说明：仅需在全新的容器/系统上运行一次！
 # ==============================================================================
 
@@ -24,7 +24,7 @@ mkdir -p "$APP_DIR" "$DATA_DIR"
 echo -e "\n⏳ 1. 正在更新系统软件包并安装基础依赖..."
 export DEBIAN_FRONTEND=noninteractive
 apt update && apt upgrade -y
-apt install -y wget curl unzip xfce4 xrdp python3 python3-pip sqlite3 jq tzdata
+apt install -y wget curl unzip xfce4 xrdp python3 python3-pip sqlite3 jq tzdata cron
 
 # 设置系统时区为 Asia/Shanghai (UTC+8)
 timedatectl set-timezone Asia/Shanghai || true
@@ -366,11 +366,71 @@ if __name__ == "__main__":
     process_data()
 PYEOF
 
-echo "✅ 基础环境搭建完成！即将自动调用交互式配置脚本..."
+# 5. 生成交互式配置脚本 (config_logger.sh)
+cat << 'CONFIGEOF' > "$APP_DIR/config_logger.sh"
+#!/bin/bash
+
+APP_DIR=$(cd $(dirname $0); pwd)
+CONFIG_FILE="$APP_DIR/config.json"
+
+# 读取现有配置
+get_cfg() {
+    python3 -c "import json; f=open('$CONFIG_FILE'); d=json.load(f); print(d.get('$1', ''))" 2>/dev/null
+}
+
+CURR_USER_ID=$(get_cfg "target_user_id")
+CURR_CRON=$(get_cfg "cron_minutes")
+
+echo "=========================================="
+echo "      VRChat Logger 交互式参数配置"
+echo "=========================================="
+
+# 询问用户配置
+read -p "请输入追踪的目标 VRChat User ID [$CURR_USER_ID]: " USER_ID
+USER_ID="${USER_ID:-$CURR_USER_ID}"
+
+read -p "请输入后台自动导出的时间间隔(分钟) [默认: ${CURR_CRON:-5}]: " CRON_MIN
+CRON_MIN="${CRON_MIN:-${CURR_CRON:-5}}"
+
+# 选项开关控制
+read -p "是否记录【在线状态/签名】变动? (Y/n): " LOG_STATUS
+LOG_STATUS=$(echo "${LOG_STATUS:-Y}" | grep -iq "^y" && echo "true" || echo "false")
+
+read -p "是否记录【更换房间 GPS】位置? (Y/n): " LOG_WORLD
+LOG_WORLD=$(echo "${LOG_WORLD:-Y}" | grep -iq "^y" && echo "true" || echo "false")
+
+read -p "是否记录【更换 Avatar 模型】历史? (Y/n): " LOG_LOG_AVATAR
+LOG_AVATAR=$(echo "${LOG_LOG_AVATAR:-Y}" | grep -iq "^y" && echo "true" || echo "false")
+
+read -p "是否记录【修改 Bio 简介】记录? (Y/n): " LOG_BIO
+LOG_BIO=$(echo "${LOG_BIO:-Y}" | grep -iq "^y" && echo "true" || echo "false")
+
+# 更新 config.json
+cat <<JSON > "$CONFIG_FILE"
+{
+  "target_user_id": "$USER_ID",
+  "cron_minutes": $CRON_MIN,
+  "log_status": $LOG_STATUS,
+  "log_world": $LOG_WORLD,
+  "log_avatar": $LOG_AVATAR,
+  "log_bio": $LOG_BIO
+}
+JSON
+
+# 更新 Crontab 定时任务
+(crontab -l 2>/dev/null | grep -v "$APP_DIR/export_daily.py" ; echo "*/$CRON_MIN * * * * python3 $APP_DIR/export_daily.py >/dev/null 2>&1") | crontab -
+
+echo "------------------------------------------"
+echo "✅ 配置已成功更新！"
+echo "📌 当前追踪 Target ID: $USER_ID"
+echo "⏱️ 后台 Cron 定时任务: 每 $CRON_MIN 分钟刷新一次"
+echo "=========================================="
+CONFIGEOF
+
+chmod +x "$APP_DIR/config_logger.sh"
+
+echo -e "\n✅ 基础环境搭建完成！即将自动调用交互式配置脚本..."
 sleep 1
 
 # 首次自动启动配置脚本
-chmod +x "$APP_DIR/config_logger.sh" 2>/dev/null || true
-if [ -f "$APP_DIR/config_logger.sh" ]; then
-    bash "$APP_DIR/config_logger.sh"
-fi
+bash "$APP_DIR/config_logger.sh"
